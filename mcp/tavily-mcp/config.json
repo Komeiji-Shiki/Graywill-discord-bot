@@ -1,0 +1,8 @@
+{
+  "name": "tavily",
+  "description": "Tavily MCP 服务器（search/extract/map/crawl/research）",
+  "type": "stdio",
+  "command": "node",
+  "args": ["build/index.js"],
+  "enabled": true
+}

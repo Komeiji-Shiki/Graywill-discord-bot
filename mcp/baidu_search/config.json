@@ -1,0 +1,14 @@
+{
+    "name": "baidu_search",
+    "description": "百度网页搜索服务，提供网页、新闻、资讯等内容搜索功能",
+    "version": "1.0.0",
+    "type": "stdio",
+    "command": "python",
+    "args": [],
+    "tools": [
+        {
+            "name": "baidu_web_search",
+            "description": "使用百度搜索引擎搜索网页内容"
+        }
+    ]
+}
