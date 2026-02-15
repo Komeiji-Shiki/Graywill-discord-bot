@@ -25,6 +25,8 @@ export interface BuildChannelPromptOptions {
   outputFormat?: 'openai' | 'gemini' | 'tagged' | 'text'
   view?: 'model' | 'user'
   sessionId?: string
+  /** 供调用方注入的额外宏（例如 xmlToolPrompt） */
+  extraMacros?: Record<string, string>
 }
 
 export interface BuildChannelPromptOutput {
@@ -48,8 +50,10 @@ function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
 function defaultPreset(): PresetInfo {
   return {
     name: 'Default',
-    apiSetting: {},
+    utilityPrompts: {},
     regexScripts: [],
+    other: {},
+    apiSetting: {},
     prompts: [
       {
         identifier: 'main',
@@ -278,8 +282,11 @@ export function buildPromptForChannel(
     ? `频道参与者（@提及时使用 <@ID> 格式）:\n${participantLines}`
     : ''
 
+  const extraMacros = options.extraMacros ?? {}
+
   const macros: Record<string, string> = {
     ...safeJsonParse<Record<string, string>>(cfg.customMacrosJson, {}),
+    ...extraMacros,
     char: charName,
     // {{user}} 宏：优先使用频道独立设置，否则回退到 'User'
     user: cfg.userDisplayName?.trim() || 'User',
@@ -302,6 +309,8 @@ export function buildPromptForChannel(
     summaryContent: summaryContent
       ? `[之前的对话总结]\n${summaryContent}`
       : '',
+    // XML 工具调用提示词宏（可在预设中使用 {{xmlToolPrompt}}）
+    xmlToolPrompt: String(extraMacros.xmlToolPrompt ?? ''),
   }
 
   const localVars = listChannelVariables(channelId)

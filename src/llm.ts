@@ -12,11 +12,24 @@ export interface ImageContentPart {
 
 export type ContentPart = TextContentPart | ImageContentPart
 
+export interface OpenAIToolFunctionCall {
+  name: string
+  arguments: string
+}
+
+export interface OpenAIToolCall {
+  id?: string
+  type?: string
+  index?: number
+  function: OpenAIToolFunctionCall
+}
+
 export interface OpenAIMessage {
   role: OpenAIRole
-  content: string | ContentPart[]
+  content: string | ContentPart[] | null
   name?: string
   tool_call_id?: string
+  tool_calls?: OpenAIToolCall[]
 }
 
 /**
@@ -68,8 +81,9 @@ export function buildMultimodalContent(
 /**
  * 提取 OpenAIMessage 的纯文本内容（忽略图片部分）
  */
-export function extractTextContent(content: string | ContentPart[]): string {
+export function extractTextContent(content: string | ContentPart[] | null | undefined): string {
   if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
   return content
     .filter((p): p is TextContentPart => p.type === 'text')
     .map((p) => p.text)
@@ -109,6 +123,9 @@ export interface ChatCompletionParams {
 
 export interface ChatCompletionResult {
   content: string
+  reasoningContent?: string
+  toolCalls?: OpenAIToolCall[]
+  finishReason?: string
   usage?: OpenAIUsage
   raw: any
 }
@@ -249,10 +266,41 @@ export async function chatCompletions(params: ChatCompletionParams): Promise<Cha
   }
 
   const payload = text ? JSON.parse(text) : {}
-  const content = String(payload?.choices?.[0]?.message?.content ?? '')
+  const choice = payload?.choices?.[0]
+  const message = choice?.message ?? {}
+  const content = typeof message?.content === 'string' ? message.content : ''
+  const reasoningContent =
+    typeof message?.reasoning_content === 'string'
+      ? message.reasoning_content
+      : typeof message?.reasoning === 'string'
+        ? message.reasoning
+        : undefined
+
+  const toolCallsRaw: unknown[] = Array.isArray(message?.tool_calls) ? message.tool_calls : []
+  const toolCalls: OpenAIToolCall[] = toolCallsRaw
+    .filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === 'object')
+    .map((x) => {
+      const fn = (x as { function?: unknown }).function
+      const fnObj = fn && typeof fn === 'object' ? (fn as Record<string, unknown>) : {}
+      const name = typeof fnObj.name === 'string' ? fnObj.name : ''
+      const argumentsText = typeof fnObj.arguments === 'string' ? fnObj.arguments : '{}'
+      return {
+        id: typeof x.id === 'string' ? x.id : undefined,
+        type: typeof x.type === 'string' ? x.type : 'function',
+        index: typeof x.index === 'number' ? x.index : undefined,
+        function: {
+          name,
+          arguments: argumentsText,
+        },
+      }
+    })
+    .filter((x) => x.function.name.length > 0)
 
   return {
     content,
+    reasoningContent,
+    toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    finishReason: typeof choice?.finish_reason === 'string' ? choice.finish_reason : undefined,
     usage: payload?.usage,
     raw: payload,
   }
@@ -387,6 +435,7 @@ export async function* streamChatCompletions(
       }
     }
 
+    // 每次见到 usage 都 yield done —— 消费端负责用覆盖语义处理同一轮内的多次上报
     if (packet?.usage) {
       const prompt = Number(packet.usage.prompt_tokens ?? 0)
       const completion = Number(packet.usage.completion_tokens ?? 0)

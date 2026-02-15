@@ -79,8 +79,15 @@ import {
   type OpenAIMessage,
   type ContentPart,
 } from './llm.js'
+import { MCPManager } from './mcp.js'
+import {
+  buildXmlToolSystemPrompt,
+  parseXmlToolCalls,
+  stripXmlToolCalls,
+} from './xmlToolCompat.js'
 
 const app = Fastify({ logger: true })
+const mcpManager = new MCPManager({ logger: app.log })
 
 const PORT = Number(process.env.PORT ?? 3000)
 const HOST = process.env.HOST ?? '0.0.0.0'
@@ -198,6 +205,17 @@ const sessionCreateSchema = z.object({
 
 const historyResyncSchema = z.object({
   limit: z.number().int().min(1).max(1000).optional(),
+})
+
+const summariesExportSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+  ids: z.array(z.number().int().positive()).min(1),
+})
+
+const summariesImportMergeSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+  replaceIds: z.array(z.number().int().positive()).min(1),
+  summary: z.string().min(1),
 })
 
 const endpointSchema = z.object({
@@ -487,6 +505,45 @@ function safeParseJsonObject(raw: string | null | undefined): Record<string, unk
   return {}
 }
 
+function parseBooleanCompatFlag(v: unknown): boolean | null {
+  if (typeof v === 'boolean') return v
+  if (typeof v === 'number') return v !== 0
+  if (typeof v !== 'string') return null
+
+  const s = v.trim().toLowerCase()
+  if (!s) return null
+  if (['1', 'true', 'yes', 'on'].includes(s)) return true
+  if (['0', 'false', 'no', 'off'].includes(s)) return false
+  return null
+}
+
+function splitEndpointExtraParams(raw: string | null | undefined): {
+  modelExtraParams: Record<string, unknown>
+  useXmlTools: boolean
+  forceNativeTools: boolean
+} {
+  const all = safeParseJsonObject(raw)
+  const modelExtraParams: Record<string, unknown> = { ...all }
+
+  const explicitXml =
+    parseBooleanCompatFlag(all.useXmlTools) ?? parseBooleanCompatFlag(all.use_xml_tools) ?? false
+  const forceNative =
+    parseBooleanCompatFlag(all.forceNativeTools) ??
+    parseBooleanCompatFlag(all.force_native_tools) ??
+    false
+
+  delete modelExtraParams.useXmlTools
+  delete modelExtraParams.use_xml_tools
+  delete modelExtraParams.forceNativeTools
+  delete modelExtraParams.force_native_tools
+
+  return {
+    modelExtraParams,
+    useXmlTools: explicitXml,
+    forceNativeTools: forceNative,
+  }
+}
+
 function parseDbBool(v: unknown): boolean {
   return Number(v) === 1
 }
@@ -519,6 +576,17 @@ function mapDbChannelMessageRow(row: any): {
     sessionId: String(row?.session_id ?? 'default'),
     createdAt: String(row?.created_at ?? ''),
   }
+}
+
+function normalizePositiveIntIds(input: number[]): number[] {
+  return Array.from(
+    new Set(
+      input
+        .map((x) => Number(x))
+        .filter((x) => Number.isFinite(x) && x > 0)
+        .map((x) => Math.floor(x))
+    )
+  )
 }
 
 function buildCopiedEndpointId(sourceId: string, existingIds: Set<string>): string {
@@ -1040,6 +1108,21 @@ function toOpenAIMessages(output: unknown): OpenAIMessage[] {
   return out
 }
 
+function demoteSystemMessagesExceptFirst(messages: OpenAIMessage[]): OpenAIMessage[] {
+  let seenFirstSystem = false
+  return messages.map((msg) => {
+    if (msg.role !== 'system') return msg
+    if (!seenFirstSystem) {
+      seenFirstSystem = true
+      return msg
+    }
+    return {
+      ...msg,
+      role: 'user',
+    }
+  })
+}
+
 function isDmMessage(message: any): boolean {
   return typeof message?.channel?.isDMBased === 'function' && message.channel.isDMBased()
 }
@@ -1088,8 +1171,23 @@ function formatReplyMetaLine(input: {
 }
 
 function getToolDefinitionsForChannel(_channelId: string): unknown[] {
-  // 预留：后续可在此注入工具定义（OpenAI tools/function calling）
-  return []
+  return mcpManager.getOpenAITools()
+}
+
+function buildXmlToolPromptMacroForChannel(channelId: string, cfg: ChannelConfigRecord): string {
+  const endpoint = resolveEndpointForChannel(cfg)
+  if (!endpoint) return ''
+
+  const tools = cfg.toolsEnabled ? getToolDefinitionsForChannel(channelId) : []
+
+  const { useXmlTools: explicitXmlTools, forceNativeTools } = splitEndpointExtraParams(
+    endpoint.extraParams
+  )
+  const autoXmlTools = /claude/i.test(endpoint.model)
+  const useXmlToolCompat = !forceNativeTools && (explicitXmlTools || autoXmlTools)
+
+  if (!useXmlToolCompat) return ''
+  return buildXmlToolSystemPrompt(tools)
 }
 
 /** 默认总结 system 提示词 */
@@ -1120,6 +1218,46 @@ function resolveSummaryEndpoint(
   }
   // 回退到频道主端点
   return resolveEndpointForChannel(cfg)
+}
+
+const SUMMARY_CONTEXT_LIMIT = 3
+function buildPreviousSummariesContext(input: {
+  channelId: string
+  sessionId?: string
+  maxItems?: number
+  excludeSummaryId?: number
+  beforeCreatedAt?: string
+}): string {
+  const maxItemsRaw = Number(input.maxItems ?? SUMMARY_CONTEXT_LIMIT)
+  const maxItems = Number.isFinite(maxItemsRaw) ? Math.max(0, Math.floor(maxItemsRaw)) : SUMMARY_CONTEXT_LIMIT
+  if (maxItems <= 0) return ''
+
+  const beforeMs = input.beforeCreatedAt ? new Date(input.beforeCreatedAt).getTime() : Number.NaN
+
+  const picked = listChannelSummaries(input.channelId, input.sessionId)
+    .filter((s) => {
+      if (typeof input.excludeSummaryId === 'number' && s.id === input.excludeSummaryId) return false
+      if (Number.isFinite(beforeMs)) {
+        const createdAtMs = new Date(s.createdAt).getTime()
+        if (!Number.isFinite(createdAtMs) || createdAtMs >= beforeMs) return false
+      }
+      return true
+    })
+    .slice(0, maxItems)
+    .reverse()
+
+  if (picked.length === 0) return ''
+
+  const lines: string[] = []
+  for (let i = 0; i < picked.length; i++) {
+    const s = picked[i]
+    const from = s.coversFrom ?? '未知'
+    const to = s.coversTo ?? '未知'
+    lines.push(`[历史总结${i + 1}] 覆盖区间: ${from} ~ ${to}`)
+    lines.push(s.summary.trim())
+    lines.push('')
+  }
+  return lines.join('\n').trim()
 }
 
 async function maybeSummarizeChannel(
@@ -1170,9 +1308,26 @@ async function maybeSummarizeChannel(
     const systemPrompt = summaryCfg.summarySystemPrompt?.trim() || DEFAULT_SUMMARY_SYSTEM_PROMPT
     const userTemplate = summaryCfg.summaryUserPrompt?.trim() || DEFAULT_SUMMARY_USER_PROMPT
     const userContent = userTemplate.replace(/\{\{chatLog\}\}/gi, historyBlock.mergedUserContent)
+    const previousSummaryContext = buildPreviousSummariesContext({
+      channelId,
+      sessionId: cfg.activeSessionId,
+      maxItems: SUMMARY_CONTEXT_LIMIT,
+    })
+
+    const previousSummaryMessages: OpenAIMessage[] = previousSummaryContext
+      ? [
+          {
+            role: 'system',
+            content:
+              '你会先收到“已有历史总结”作为上下文，再收到“新增聊天日志”。请在继承历史的前提下进行增量压缩，避免重复复述旧内容。',
+          },
+          { role: 'user', content: `【已有历史总结】\n${previousSummaryContext}` },
+        ]
+      : []
 
     const summaryMessages: OpenAIMessage[] = [
       { role: 'system', content: systemPrompt },
+      ...previousSummaryMessages,
       { role: 'user', content: userContent },
     ]
 
@@ -1315,6 +1470,35 @@ async function generateChannelReply(message: any, cfg: ChannelConfigRecord): Pro
   const endpoint = resolveEndpointForChannel(cfg)
   if (!endpoint) return 0
 
+  const tools = cfg.toolsEnabled ? getToolDefinitionsForChannel(cfg.channelId) : []
+  const normalizedTools = tools.length > 0 ? tools : undefined
+  const {
+    modelExtraParams,
+    useXmlTools: explicitXmlTools,
+    forceNativeTools,
+  } = splitEndpointExtraParams(endpoint.extraParams)
+  const autoXmlTools = /claude/i.test(endpoint.model)
+  const useXmlToolCompat =
+    Boolean(Array.isArray(normalizedTools) && normalizedTools.length > 0) &&
+    !forceNativeTools &&
+    (explicitXmlTools || autoXmlTools)
+
+  app.log.info(
+    {
+      channelId: cfg.channelId,
+      model: endpoint.model,
+      useXmlToolCompat,
+      explicitXmlTools,
+      autoXmlTools,
+      forceNativeTools,
+      toolCount: normalizedTools?.length ?? 0,
+    },
+    'tool call compatibility mode resolved'
+  )
+
+  const xmlToolPrompt =
+    useXmlToolCompat && normalizedTools ? buildXmlToolSystemPrompt(normalizedTools) : ''
+
   const built = buildPromptForChannel(cfg.channelId, {
     historyLimit: normalizeHistoryLimit(cfg.historyMessageLimit, 500),
     useUnsummarized: true,
@@ -1322,9 +1506,13 @@ async function generateChannelReply(message: any, cfg: ChannelConfigRecord): Pro
     outputFormat: 'openai',
     view: 'model',
     sessionId: cfg.activeSessionId,
+    extraMacros: {
+      xmlToolPrompt,
+    },
   })
 
-  const llmMessages = toOpenAIMessages(built.result.stages.output.afterPostRegex)
+  const llmMessagesRaw = toOpenAIMessages(built.result.stages.output.afterPostRegex)
+  const llmMessages = demoteSystemMessagesExceptFirst(llmMessagesRaw)
   if (llmMessages.length === 0) return 0
 
   // 多模态：提取触发消息 + 引用消息中的图片，下载转 base64 data URI 后注入到最后一条 user 消息
@@ -1362,8 +1550,6 @@ async function generateChannelReply(message: any, cfg: ChannelConfigRecord): Pro
   const estimatedInputTokens = estimateTokens(
     llmMessages.map((m) => extractTextContent(m.content)).join('\n')
   )
-  const tools = cfg.toolsEnabled ? getToolDefinitionsForChannel(cfg.channelId) : []
-  const normalizedTools = tools.length > 0 ? tools : undefined
   const reasoningEffort = (['', 'auto', 'low', 'medium', 'high'] as const).includes(
     endpoint.reasoningEffort as any
   )
@@ -1371,8 +1557,12 @@ async function generateChannelReply(message: any, cfg: ChannelConfigRecord): Pro
     : ''
 
   let outputText = cfg.assistantPrefill ?? ''
+  /** 跨轮次累积的展示文本（含之前轮次的正文 + 工具调用摘要），用于 Discord 展示 */
+  let displayPrefix = cfg.assistantPrefill ?? ''
   let thinkingText = ''
   let toolCallCount = 0
+  let modelIterations = 0
+  let firstIterUsageInput = 0
   let usageInput = 0
   let usageOutput = 0
   let usageTotal = 0
@@ -1423,33 +1613,231 @@ async function generateChannelReply(message: any, cfg: ChannelConfigRecord): Pro
   try {
     await flushEdit(true)
 
-    for await (const chunk of streamChatCompletions({
-      baseUrl: endpoint.baseUrl,
-      apiKey: endpoint.apiKey,
-      model: endpoint.model,
-      messages: llmMessages,
-      temperature: endpoint.temperature,
-      topP: endpoint.topP,
-      maxTokens: endpoint.maxTokens,
-      reasoningMaxTokens: endpoint.reasoningMaxTokens,
-      reasoningEffort,
-      showThinking: endpoint.showThinking,
-      extraParams: safeParseJsonObject(endpoint.extraParams),
-      tools: normalizedTools,
-      stream: true,
-    })) {
-      if (chunk.type === 'thinking' && chunk.text) {
-        thinkingText += chunk.text
-        await flushEdit(false)
-      } else if (chunk.type === 'content' && chunk.text) {
-        outputText += chunk.text
-        await flushEdit(false)
-      } else if (chunk.type === 'tool_call') {
-        toolCallCount += 1
-      } else if (chunk.type === 'done' && chunk.usage) {
-        usageInput = chunk.usage.inputTokens
-        usageOutput = chunk.usage.outputTokens
-        usageTotal = chunk.usage.totalTokens
+    {
+      // 统一流式处理：有工具时多轮迭代，无工具时单轮
+      const hasTools = Array.isArray(normalizedTools) && normalizedTools.length > 0
+      const maxIterations = hasTools
+        ? Math.max(1, Math.floor(Number(cfg.maxToolIterations || 1)))
+        : 1
+      const messagesForLoop: OpenAIMessage[] = [...llmMessages]
+      let gotFinalResponse = false
+
+      for (let iter = 0; iter < maxIterations; iter++) {
+        modelIterations += 1
+
+        // ── 本轮流式累积变量 ──
+        let iterContent = ''
+        let xmlToolDetectedMidStream = false
+        const nativeToolCallMap = new Map<number, { id: string; name: string; arguments: string }>()
+        // 用于检测完整 XML 工具调用块的正则
+        const xmlToolBlockRe = /<<<tool_call>>>[\s\S]*?<<<\/tool_call>>>/i
+        // 本轮 usage（覆盖语义：同一轮内多个 packet 的 usage 取最后一次）
+        let iterUsageInput = 0
+        let iterUsageOutput = 0
+        let iterUsageTotal = 0
+
+        for await (const chunk of streamChatCompletions({
+          baseUrl: endpoint.baseUrl,
+          apiKey: endpoint.apiKey,
+          model: endpoint.model,
+          messages: messagesForLoop,
+          temperature: endpoint.temperature,
+          topP: endpoint.topP,
+          maxTokens: endpoint.maxTokens,
+          reasoningMaxTokens: endpoint.reasoningMaxTokens,
+          reasoningEffort,
+          showThinking: endpoint.showThinking,
+          extraParams: modelExtraParams,
+          tools: useXmlToolCompat ? undefined : normalizedTools,
+          stream: true,
+        })) {
+          if (chunk.type === 'thinking' && chunk.text) {
+            thinkingText += chunk.text
+            await flushEdit(false)
+          } else if (chunk.type === 'content' && chunk.text) {
+            iterContent += chunk.text
+            // 流式展示：displayPrefix（之前轮次累积）+ 本轮当前内容
+            if (useXmlToolCompat) {
+              const stripped = stripXmlToolCalls(iterContent)
+              outputText = [displayPrefix, stripped].filter(s => s.trim()).join('\n\n')
+              // 检测到完整 XML 工具调用块 → 立即中断流
+              if (xmlToolBlockRe.test(iterContent)) {
+                xmlToolDetectedMidStream = true
+                app.log.info(
+                  { channelId: cfg.channelId, iter },
+                  'XML tool call detected mid-stream, aborting stream to execute tool'
+                )
+                break
+              }
+            } else {
+              outputText = [displayPrefix, iterContent].filter(s => s.trim()).join('\n\n')
+            }
+            await flushEdit(false)
+          } else if (chunk.type === 'tool_call' && chunk.toolCall) {
+            // 原生 tool_call delta 累积合并
+            const tc = chunk.toolCall as any
+            const idx = Number(tc.index ?? 0)
+            if (!nativeToolCallMap.has(idx)) {
+              nativeToolCallMap.set(idx, {
+                id: String(tc.id ?? ''),
+                name: String(tc.function?.name ?? ''),
+                arguments: String(tc.function?.arguments ?? ''),
+              })
+            } else {
+              const existing = nativeToolCallMap.get(idx)!
+              if (tc.id) existing.id = String(tc.id)
+              if (tc.function?.name) existing.name += String(tc.function.name)
+              if (tc.function?.arguments) existing.arguments += String(tc.function.arguments)
+            }
+          } else if (chunk.type === 'done' && chunk.usage) {
+            // 同一轮流式请求内：覆盖（上游可能多次上报累计值）
+            iterUsageInput = chunk.usage.inputTokens
+            iterUsageOutput = chunk.usage.outputTokens
+            iterUsageTotal = chunk.usage.totalTokens
+          }
+        }
+
+        // ── 本轮 usage 累加到全局（跨轮相加）──
+        usageInput += iterUsageInput
+        usageOutput += iterUsageOutput
+        usageTotal += iterUsageTotal
+
+        // 记录第一轮的 input token 数（用于总结阈值判断，不含工具调用膨胀）
+        if (modelIterations === 1) {
+          firstIterUsageInput = iterUsageInput
+        }
+
+        // ── 流结束，检查是否有工具调用 ──
+        if (!hasTools) {
+          // 无工具模式，单轮完成
+          gotFinalResponse = true
+          break
+        }
+
+        // 原生 tool_calls 从 delta 合并结果中构建
+        const assistantToolCalls: import('./llm.js').OpenAIToolCall[] = Array.from(nativeToolCallMap.entries())
+          .sort(([a], [b]) => a - b)
+          .map(([, tc]) => ({
+            id: tc.id || undefined,
+            type: 'function' as const,
+            function: { name: tc.name, arguments: tc.arguments },
+          }))
+          .filter((tc) => tc.function.name.length > 0)
+
+        const xmlToolCalls = useXmlToolCompat ? parseXmlToolCalls(iterContent) : []
+        const assistantContent = useXmlToolCompat
+          ? stripXmlToolCalls(iterContent)
+          : iterContent
+
+        const hasNativeToolCalls = assistantToolCalls.length > 0
+        const hasXmlToolCalls = xmlToolCalls.length > 0
+
+        // 构建 assistant message 加入上下文
+        const assistantMessageForModel: OpenAIMessage = {
+          role: 'assistant',
+          content: assistantContent,
+          ...(hasNativeToolCalls ? { tool_calls: assistantToolCalls } : {}),
+        }
+        messagesForLoop.push(assistantMessageForModel)
+
+        if (!hasNativeToolCalls && !hasXmlToolCalls) {
+          outputText = [displayPrefix, assistantContent].filter(s => s.trim()).join('\n\n')
+          gotFinalResponse = true
+          break
+        }
+
+        // XML 模式：清洗 outputText（剥离工具调用后的正文）
+        if (useXmlToolCompat) {
+          outputText = [displayPrefix, assistantContent].filter(s => s.trim()).join('\n\n')
+        }
+
+        // ── 收集本轮工具调用摘要（用于 Discord 展示） ──
+        const toolSummaries: string[] = []
+
+        // ── 执行原生工具调用 ──
+        if (hasNativeToolCalls) {
+          toolCallCount += assistantToolCalls.length
+
+          for (let tcIndex = 0; tcIndex < assistantToolCalls.length; tcIndex++) {
+            const tc = assistantToolCalls[tcIndex]
+            const toolCallId =
+              (typeof tc.id === 'string' && tc.id.trim()) || `call_${iter}_${tcIndex}`
+            const toolName =
+              typeof tc.function?.name === 'string' ? tc.function.name.trim() : ''
+            const toolArgs = safeParseJsonObject(tc.function?.arguments ?? '{}')
+
+            // 生成用户可读的工具调用摘要
+            toolSummaries.push(`-# 🔧 调用工具: ${toolName || 'unknown'} 输入内容: ${tc.function?.arguments ?? '{}'}`)
+
+            let toolResult = ''
+            if (!toolName) {
+              toolResult = '工具调用失败：工具名为空'
+            } else if (!mcpManager.hasTool(toolName)) {
+              toolResult = `工具调用失败：未注册工具 ${toolName}`
+            } else {
+              try {
+                toolResult = await mcpManager.callTool(toolName, toolArgs)
+              } catch (toolError) {
+                const msg = toolError instanceof Error ? toolError.message : String(toolError)
+                toolResult = `工具调用失败：${msg}`
+              }
+            }
+
+            messagesForLoop.push({
+              role: 'tool',
+              tool_call_id: toolCallId,
+              content: toolResult || '工具返回空结果',
+            })
+          }
+        }
+
+        // ── 执行 XML 工具调用 ──
+        if (hasXmlToolCalls) {
+          toolCallCount += xmlToolCalls.length
+          const resultBlocks: string[] = []
+
+          for (const tc of xmlToolCalls) {
+            const toolName = String(tc.name ?? '').trim()
+            const toolArgs = tc.arguments ?? {}
+
+            // 生成用户可读的工具调用摘要
+            toolSummaries.push(`-# 🔧 调用工具: ${toolName || 'unknown'} 输入内容: ${JSON.stringify(toolArgs)}`)
+
+            let toolResult = ''
+            if (!toolName) {
+              toolResult = '工具调用失败：工具名为空'
+            } else if (!mcpManager.hasTool(toolName)) {
+              toolResult = `工具调用失败：未注册工具 ${toolName}`
+            } else {
+              try {
+                toolResult = await mcpManager.callTool(toolName, toolArgs)
+              } catch (toolError) {
+                const msg = toolError instanceof Error ? toolError.message : String(toolError)
+                toolResult = `工具调用失败：${msg}`
+              }
+            }
+
+            resultBlocks.push(`[${toolName || 'unknown'}]\n${toolResult || '工具返回空结果'}`)
+          }
+
+          messagesForLoop.push({
+            role: 'user',
+            content: `【工具调用结果】\n\n${resultBlocks.join('\n\n')}\n\n请基于以上工具结果继续回答。`,
+          })
+        }
+
+        // 更新 displayPrefix：累积本轮正文 + 工具调用摘要（用于下一轮展示）
+        const cleanIterText = useXmlToolCompat ? assistantContent : iterContent
+        const parts: string[] = [displayPrefix, cleanIterText].filter(s => s.trim())
+        if (toolSummaries.length > 0) {
+          parts.push(toolSummaries.join('\n'))
+        }
+        displayPrefix = parts.join('\n')
+        outputText = displayPrefix
+      }
+
+      if (!gotFinalResponse && !outputText.trim()) {
+        outputText = `⚠️ 已达到最大工具调用轮次（${maxIterations}），仍未获得最终回复。`
       }
     }
   } catch (error) {
@@ -1470,7 +1858,7 @@ async function generateChannelReply(message: any, cfg: ChannelConfigRecord): Pro
   if (usageOutput <= 0) usageOutput = estimateTokens(outputText)
   if (usageTotal <= 0) usageTotal = usageInput + usageOutput
 
-  const iterations = Math.min(Math.max(1, cfg.maxToolIterations), Math.max(1, toolCallCount + 1))
+  const iterations = Math.max(1, modelIterations || toolCallCount + 1)
   const footer = formatReplyMetaLine({
     elapsedMs: Date.now() - startedAtMs,
     inputTokens: usageInput,
@@ -1494,8 +1882,12 @@ async function generateChannelReply(message: any, cfg: ChannelConfigRecord): Pro
   const finalContent = clipDiscordContent(`${finalBody}\n\n${footer}`)
   await assistantMessage.edit(finalContent)
 
-  // ⭐ 存入DB时保留原始正文（不经过 user 视角正则，已在上面剥离过假 footer）
+  // ⭐ 存入DB时保留原始正文：剥除工具调用摘要行（-# 🔧 ...）和假 footer
   const cleanContent = outputText
+    .split('\n')
+    .filter(line => !line.startsWith('-# 🔧 '))
+    .join('\n')
+    .trim()
   // 优先使用上游返回的真实 output token 数，回退到估算值
   const replyTokenCount = usageOutput > 0 ? usageOutput : estimateTokens(cleanContent)
   insertChannelMessage({
@@ -1511,7 +1903,8 @@ async function generateChannelReply(message: any, cfg: ChannelConfigRecord): Pro
     createdAt: assistantMessage.createdAt.toISOString(),
   })
 
-  return usageInput
+  // 返回第一轮的 input token 数，用于总结阈值判断（不含工具调用带来的上下文膨胀）
+  return firstIterUsageInput > 0 ? firstIterUsageInput : usageInput
 }
 
 class DiscordRuntime {
@@ -2971,6 +3364,187 @@ app.get('/api/summaries/:channelId', async (request) => {
   }
 })
 
+app.post('/api/summaries/:channelId/export', async (request, reply) => {
+  try {
+    const { channelId } = request.params as { channelId: string }
+    const body = summariesExportSchema.parse(request.body ?? {})
+    const ids = normalizePositiveIntIds(body.ids)
+    if (ids.length === 0) {
+      reply.code(400)
+      return { ok: false, message: '请至少选择一条总结进行导出' }
+    }
+
+    const targetSessionId = body.sessionId?.trim() || undefined
+    const source = listChannelSummaries(channelId, targetSessionId)
+    const byId = new Map(source.map((s) => [s.id, s]))
+
+    const selected = ids
+      .map((id) => byId.get(id) ?? null)
+      .filter((x): x is NonNullable<typeof x> => x !== null)
+
+    if (selected.length !== ids.length) {
+      const selectedIds = new Set(selected.map((x) => x.id))
+      const missing = ids.filter((id) => !selectedIds.has(id))
+      reply.code(400)
+      return { ok: false, message: `以下总结不存在或不在当前会话中: ${missing.join(', ')}` }
+    }
+
+    // 导出阅读顺序：统一按时间从旧到新（优先 coversFrom，再回退 createdAt）
+    const selectedSorted = [...selected].sort((a, b) => {
+      const aFromMs = new Date(a.coversFrom || a.createdAt).getTime()
+      const bFromMs = new Date(b.coversFrom || b.createdAt).getTime()
+      const aFromOk = Number.isFinite(aFromMs)
+      const bFromOk = Number.isFinite(bFromMs)
+
+      if (aFromOk && bFromOk && aFromMs !== bFromMs) return aFromMs - bFromMs
+      if (aFromOk && !bFromOk) return -1
+      if (!aFromOk && bFromOk) return 1
+
+      const aCreatedMs = new Date(a.createdAt).getTime()
+      const bCreatedMs = new Date(b.createdAt).getTime()
+      const aCreatedOk = Number.isFinite(aCreatedMs)
+      const bCreatedOk = Number.isFinite(bCreatedMs)
+
+      if (aCreatedOk && bCreatedOk && aCreatedMs !== bCreatedMs) return aCreatedMs - bCreatedMs
+      if (aCreatedOk && !bCreatedOk) return -1
+      if (!aCreatedOk && bCreatedOk) return 1
+
+      return a.id - b.id
+    })
+
+    return {
+      ok: true,
+      data: {
+        version: 1,
+        exportedAt: nowIso(),
+        channelId,
+        sessionId: targetSessionId ?? null,
+        count: selectedSorted.length,
+        summaries: selectedSorted,
+      },
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : '批量导出总结失败'
+    reply.code(400)
+    return { ok: false, message: msg }
+  }
+})
+
+app.post('/api/summaries/:channelId/import-merge', async (request, reply) => {
+  try {
+    const { channelId } = request.params as { channelId: string }
+    const body = summariesImportMergeSchema.parse(request.body ?? {})
+    const replaceIds = normalizePositiveIntIds(body.replaceIds)
+    if (replaceIds.length === 0) {
+      reply.code(400)
+      return { ok: false, message: '请至少选择一条要覆盖的总结' }
+    }
+
+    const summaryText = body.summary.trim()
+    if (!summaryText) {
+      reply.code(400)
+      return { ok: false, message: '导入总结内容不能为空' }
+    }
+
+    const requestedSessionId = body.sessionId?.trim() || undefined
+    const all = listChannelSummaries(channelId, requestedSessionId)
+    const byId = new Map(all.map((s) => [s.id, s]))
+
+    const selected = replaceIds
+      .map((id) => byId.get(id) ?? null)
+      .filter((x): x is NonNullable<typeof x> => x !== null)
+
+    if (selected.length !== replaceIds.length) {
+      const selectedIds = new Set(selected.map((x) => x.id))
+      const missing = replaceIds.filter((id) => !selectedIds.has(id))
+      reply.code(400)
+      return { ok: false, message: `以下总结不存在或不在当前会话中: ${missing.join(', ')}` }
+    }
+
+    const sessionSet = new Set(selected.map((s) => s.sessionId || 'default'))
+    if (sessionSet.size !== 1) {
+      reply.code(400)
+      return { ok: false, message: '选中的总结跨会话，不能合并覆盖。请先筛选单一会话。' }
+    }
+
+    const targetSessionId = selected[0].sessionId || 'default'
+    if (requestedSessionId && targetSessionId !== requestedSessionId) {
+      reply.code(400)
+      return { ok: false, message: '目标会话与所选总结会话不一致' }
+    }
+
+    const fromCandidates = selected
+      .map((s) => s.coversFrom || s.createdAt)
+      .filter(Boolean)
+      .sort()
+    const toCandidates = selected
+      .map((s) => s.coversTo || s.createdAt)
+      .filter(Boolean)
+      .sort()
+
+    const coversFrom = fromCandidates.length > 0 ? fromCandidates[0] : null
+    const coversTo = toCandidates.length > 0 ? toCandidates[toCandidates.length - 1] : null
+    const messageCount = selected.reduce((acc, s) => acc + Math.max(0, Number(s.messageCount ?? 0)), 0)
+    const tokenCount = estimateTokens(summaryText)
+
+    const db = getDb()
+    const placeholders = replaceIds.map(() => '?').join(',')
+    let insertedId = 0
+
+    db.transaction(() => {
+      db.prepare(`DELETE FROM channel_summaries WHERE channel_id = ? AND id IN (${placeholders})`).run(
+        channelId,
+        ...replaceIds
+      )
+
+      const inserted = db.prepare(`
+        INSERT INTO channel_summaries (
+          channel_id, session_id, summary, token_count, covers_from, covers_to, message_count, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        channelId,
+        targetSessionId,
+        summaryText,
+        tokenCount,
+        coversFrom,
+        coversTo,
+        messageCount,
+        nowIso()
+      )
+
+      insertedId = Number(inserted.lastInsertRowid ?? 0)
+
+      if (coversFrom && coversTo) {
+        db.prepare(`
+          UPDATE channel_messages
+          SET is_summarized = 1
+          WHERE channel_id = ? AND session_id = ?
+            AND created_at >= ? AND created_at <= ?
+        `).run(channelId, targetSessionId, coversFrom, coversTo)
+      }
+    })()
+
+    const merged = insertedId > 0 ? getChannelSummaryById(insertedId) : null
+    if (!merged) {
+      reply.code(500)
+      return { ok: false, message: '已覆盖旧总结，但读取新总结失败' }
+    }
+
+    return {
+      ok: true,
+      data: {
+        replacedIds: replaceIds,
+        replacedCount: replaceIds.length,
+        summary: merged,
+      },
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : '导入大总结覆盖失败'
+    reply.code(400)
+    return { ok: false, message: msg }
+  }
+})
+
 app.post('/api/summaries/:channelId/trigger', async (request, reply) => {
   try {
     const { channelId } = request.params as { channelId: string }
@@ -3074,6 +3648,30 @@ app.post('/api/summaries/:id/resummarize', async (request, reply) => {
     const systemPrompt = summaryCfg.summarySystemPrompt?.trim() || DEFAULT_SUMMARY_SYSTEM_PROMPT
     const userTemplate = summaryCfg.summaryUserPrompt?.trim() || DEFAULT_SUMMARY_USER_PROMPT
     const userContent = userTemplate.replace(/\{\{chatLog\}\}/gi, historyBlock.mergedUserContent)
+    const previousSummaryContext = buildPreviousSummariesContext({
+      channelId: oldSummary.channelId,
+      sessionId: targetCfg.activeSessionId,
+      maxItems: SUMMARY_CONTEXT_LIMIT,
+      excludeSummaryId: oldSummary.id,
+      beforeCreatedAt: oldSummary.createdAt,
+    })
+
+    const previousSummaryMessages: OpenAIMessage[] = previousSummaryContext
+      ? [
+          {
+            role: 'system',
+            content:
+              '你会先收到“已有历史总结”作为上下文，再收到“待重总结的聊天日志”。请在继承历史的前提下重写该区间总结，避免重复复述旧内容。',
+          },
+          { role: 'user', content: `【已有历史总结】\n${previousSummaryContext}` },
+        ]
+      : []
+
+    const summaryMessages: OpenAIMessage[] = [
+      { role: 'system', content: systemPrompt },
+      ...previousSummaryMessages,
+      { role: 'user', content: userContent },
+    ]
 
     const summaryTemperature = summaryCfg.summaryTemperature ?? 0.2
     const summaryMaxTokens = summaryCfg.summaryMaxTokens > 0
@@ -3084,10 +3682,7 @@ app.post('/api/summaries/:id/resummarize', async (request, reply) => {
       baseUrl: endpoint.baseUrl,
       apiKey: endpoint.apiKey,
       model: endpoint.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userContent },
-      ],
+      messages: summaryMessages,
       temperature: summaryTemperature,
       topP: 1,
       maxTokens: summaryMaxTokens,
@@ -3298,6 +3893,7 @@ app.get('/api/macros/:channelId', async (request, reply) => {
     const { channelId } = request.params as { channelId: string }
     const { sessionId } = request.query as { sessionId?: string }
     const cfg = getChannelConfig(channelId)
+    const xmlToolPrompt = cfg ? buildXmlToolPromptMacroForChannel(channelId, cfg) : ''
     const built = buildPromptForChannel(channelId, {
       historyLimit: normalizeHistoryLimit(cfg?.historyMessageLimit, 500),
       useUnsummarized: true,
@@ -3305,6 +3901,7 @@ app.get('/api/macros/:channelId', async (request, reply) => {
       outputFormat: 'openai',
       view: 'model',
       sessionId: sessionId || undefined,
+      extraMacros: { xmlToolPrompt },
     })
 
     // 为每个宏附加描述信息
@@ -3325,6 +3922,7 @@ app.get('/api/macros/:channelId', async (request, reply) => {
       ownerContext: '主人身份识别上下文（自动生成的权限描述）',
       participants: '频道参与者列表（含 Discord ID，用于 @提及）',
       summaryContent: '历史对话摘要内容',
+      xmlToolPrompt: 'XML 工具调用提示词（在预设中使用 {{xmlToolPrompt}}）',
     }
 
     const entries = Object.entries(built.macros).map(([key, value]) => ({
@@ -3352,6 +3950,8 @@ app.get('/api/macros/:channelId', async (request, reply) => {
 app.post('/api/prompt/build', async (request, reply) => {
   try {
     const input = promptBuildSchema.parse(request.body)
+    const cfg = getChannelConfig(input.channelId)
+    const xmlToolPrompt = cfg ? buildXmlToolPromptMacroForChannel(input.channelId, cfg) : ''
     const built = buildPromptForChannel(input.channelId, {
       historyLimit: input.historyLimit,
       useUnsummarized: input.useUnsummarized,
@@ -3359,6 +3959,7 @@ app.post('/api/prompt/build', async (request, reply) => {
       outputFormat: input.outputFormat,
       view: input.view,
       sessionId: input.sessionId,
+      extraMacros: { xmlToolPrompt },
     })
 
     return {
@@ -3460,6 +4061,20 @@ app.post('/api/llm/chat/stream', async (request, reply) => {
 
 async function bootstrap() {
   try {
+    try {
+      await mcpManager.initialize()
+      const registeredTools = mcpManager.getOpenAITools()
+      app.log.info(
+        {
+          toolCount: registeredTools.length,
+          tools: registeredTools.map((t) => t.function.name),
+        },
+        'MCP 初始化完成，已注册工具'
+      )
+    } catch (mcpError) {
+      app.log.error({ err: mcpError }, 'MCP 初始化失败，将继续以无工具模式运行')
+    }
+
     // 自动注册默认 LLM 端点
     const defaultBaseUrl = process.env.DEFAULT_LLM_BASE_URL?.trim()
     const defaultModel = process.env.DEFAULT_LLM_MODEL?.trim()
@@ -3480,6 +4095,21 @@ async function bootstrap() {
       })
       app.log.info(`已自动注册默认 LLM 端点: ${defaultModel} @ ${defaultBaseUrl}`)
     }
+
+    // ─── MCP 诊断接口 ────────────────────────────────────
+    app.get('/api/mcp/tools', async () => {
+      const tools = mcpManager.getOpenAITools()
+      return {
+        ok: true,
+        data: {
+          toolCount: tools.length,
+          tools: tools.map((t) => ({
+            name: t.function.name,
+            description: t.function.description?.slice(0, 120) ?? '',
+          })),
+        },
+      }
+    })
 
     await app.listen({ port: PORT, host: HOST })
     app.log.info(`HTTP server running on http://${HOST}:${PORT}`)

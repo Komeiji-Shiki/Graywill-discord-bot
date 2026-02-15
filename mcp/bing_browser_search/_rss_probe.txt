@@ -1,0 +1,6 @@
+status=200
+url=https://www.bing.com/search?q=Python+3.13+new+features&format=rss&count=5
+len=5004
+has_rss=True
+item_count=10
+captcha=False

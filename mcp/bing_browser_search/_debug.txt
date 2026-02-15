@@ -1,0 +1,10 @@
+status:200
+algo:10
+captcha:False
+len:112695
+h2:10
+  MyBroadband Speed Test
+  South Africa’s top Internet speed test app – MyBroadband
+  Teste de Velocidade Minha Conex&#227;o | Speed Test 100% Gr&#225;tis
+  How to test your Internet speed in South Africa – MyBroadband
+  nPerf Teste | Speed Test nPerf | Teste de Velocidade Minha ...

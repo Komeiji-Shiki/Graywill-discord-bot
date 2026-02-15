@@ -1,0 +1,9 @@
+status=200
+url=https://www.bing.com/search?q=Python+3.13&count=3
+title=Python 3.13 - Search
+captcha=True
+len=74550
+b_algo_select=0
+b_algo_text_count=0
+b_results_exists=False
+li_under_b_results=0

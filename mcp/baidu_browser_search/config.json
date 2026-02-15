@@ -1,0 +1,16 @@
+{
+    "name": "baidu_browser_search",
+    "description": "百度浏览器搜索服务 (基于 Playwright，免费无需API Key)",
+    "version": "1.0.0",
+    "type": "stdio",
+    "command": "python",
+    "args": ["mcp_servers/baidu_browser_search/server.py"],
+    "env": {},
+    "tools": [
+        {
+            "name": "baidu_browser_search",
+            "description": "【推荐优先使用】使用浏览器模拟真实用户访问百度搜索，无需API Key，免费且稳定。返回详细的搜索结果，默认20条。"
+        }
+    ],
+    "priority": 1
+}

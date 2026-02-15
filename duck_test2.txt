@@ -1,0 +1,45 @@
+GOT_RESULT=True
+
+RESULT_TEXT:
+Found 5 search results:
+
+1. What's New In Python 3.13 — Python 3.14.3 documentation
+   URL: https://docs.python.org/3/whatsnew/3.13.html
+   Summary: Learn about thenewfeaturesand improvements inPython3.13, such as thenewinteractive interpreter, the free-threaded mode, the JIT compiler, and the type parameters. See also the deprecated and removed APIs and modules, and the release schedule changes.
+
+2. Python 3.13 New Features - GeeksforGeeks
+   URL: https://www.geeksforgeeks.org/python/python-3-13-new-features/
+   Summary: Nearly annually,Pythonreleases anewversion. The most recent version,Python3.13, will be available on May 8, 2024, followingPython3.12 in that order. This version introduced manynewfeaturesand improvements. This is a pre-release of the nextPythonversion, which introduced somenewfeaturesas well as improvements to the existing ones.
+
+3. Python 3.13: Cool New Features for You to Try - Real Python
+   URL: https://realpython.com/python313-new-features/
+   Summary: In addition to learning more about thenewfeaturescoming to the language, you'll also get some advice about what to consider before upgrading to thenewversion. Click the link below to download code examples demonstrating thenewcapabilities ofPython3.13:
+
+4. Python 3.13's best new features - Python Morsels
+   URL: https://www.pythonmorsels.com/python-313-whats-new/
+   Summary: Python3.13comes with a brandnewREPL and improvements to virtual environments and thePythondebugger.
+
+5. Python 3.13: A Beginner-Friendly Guide to All the Cool New Stuff
+   URL: https://dev.to/learncomputer/python-313-a-beginner-friendly-guide-to-all-the-cool-new-stuff-3nn1
+   Summary: Pythonjust got better! ThenewPython3.13(released in October 2024) is packed with upgrades that make coding faster, safer, and more fun. Whether you're a coding newbie or aPythonpro, this guide will break down every majorfeaturein simple terms, with examples you can try yourself.
+
+
+OUT_LINES:
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"experimental":{},"prompts":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false},"tools":{"listChanged":false}},"serverInfo":{"name":"ddg-search","version":"1.26.0"}}}
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"search","description":"\n    Search DuckDuckGo and return formatted results.\n\n    Args:\n        query: The search query string\n        max_results: Maximum number of results to return (default: 10)\n        ctx: MCP context for logging\n    ","inputSchema":{"properties":{"query":{"title":"Query","type":"string"},"max_results":{"default":10,"title":"Max Results","type":"integer"}},"required":["query"],"title":"searchArguments","type":"object"},"outputSchema":{"properties":{"result":{"title":"Result","type":"string"}},"required":["result"],"title":"searchOutput","type":"object"}},{"name":"fetch_content","description":"\n    Fetch and parse content from a webpage URL.\n\n    Args:\n        url: The webpage URL to fetch content from\n        ctx: MCP context for logging\n    ","inputSchema":{"properties":{"url":{"title":"Url","type":"string"}},"required":["url"],"title":"fetch_contentArguments","type":"object"},"outputSchema":{"properties":{"result":{"title":"Result","type":"string"}},"required":["result"],"title":"fetch_contentOutput","type":"object"}}]}}
+{"method":"notifications/message","params":{"level":"info","data":"Searching DuckDuckGo for: Python 3.13 new features"},"jsonrpc":"2.0"}
+{"method":"notifications/message","params":{"level":"info","data":"Successfully found 5 results"},"jsonrpc":"2.0"}
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"Found 5 search results:\n\n1. What's New In Python 3.13 — Python 3.14.3 documentation\n   URL: https://docs.python.org/3/whatsnew/3.13.html\n   Summary: Learn about thenewfeaturesand improvements inPython3.13, such as thenewinteractive interpreter, the free-threaded mode, the JIT compiler, and the type parameters. See also the deprecated and removed APIs and modules, and the release schedule changes.\n\n2. Python 3.13 New Features - GeeksforGeeks\n   URL: https://www.geeksforgeeks.org/python/python-3-13-new-features/\n   Summary: Nearly annually,Pythonreleases anewversion. The most recent version,Python3.13, will be available on May 8, 2024, followingPython3.12 in that order. This version introduced manynewfeaturesand improvements. This is a pre-release of the nextPythonversion, which introduced somenewfeaturesas well as improvements to the existing ones.\n\n3. Python 3.13: Cool New Features for You to Try - Real Python\n   URL: https://realpython.com/python313-new-features/\n   Summary: In addition to learning more about thenewfeaturescoming to the language, you'll also get some advice about what to consider before upgrading to thenewversion. Click the link below to download code examples demonstrating thenewcapabilities ofPython3.13:\n\n4. Python 3.13's best new features - Python Morsels\n   URL: https://www.pythonmorsels.com/python-313-whats-new/\n   Summary: Python3.13comes with a brandnewREPL and improvements to virtual environments and thePythondebugger.\n\n5. Python 3.13: A Beginner-Friendly Guide to All the Cool New Stuff\n   URL: https://dev.to/learncomputer/python-313-a-beginner-friendly-guide-to-all-the-cool-new-stuff-3nn1\n   Summary: Pythonjust got better! ThenewPython3.13(released in October 2024) is packed with upgrades that make coding faster, safer, and more fun. Whether you're a coding newbie or aPythonpro, this guide will break down every majorfeaturein simple terms, with examples you can try yourself.\n"}],"structuredContent":{"result":"Found 5 search results:\n\n1. What's New In Python 3.13 — Python 3.14.3 documentation\n   URL: https://docs.python.org/3/whatsnew/3.13.html\n   Summary: Learn about thenewfeaturesand improvements inPython3.13, such as thenewinteractive interpreter, the free-threaded mode, the JIT compiler, and the type parameters. See also the deprecated and removed APIs and modules, and the release schedule changes.\n\n2. Python 3.13 New Features - GeeksforGeeks\n   URL: https://www.geeksforgeeks.org/python/python-3-13-new-features/\n   Summary: Nearly annually,Pythonreleases anewversion. The most recent version,Python3.13, will be available on May 8, 2024, followingPython3.12 in that order. This version introduced manynewfeaturesand improvements. This is a pre-release of the nextPythonversion, which introduced somenewfeaturesas well as improvements to the existing ones.\n\n3. Python 3.13: Cool New Features for You to Try - Real Python\n   URL: https://realpython.com/python313-new-features/\n   Summary: In addition to learning more about thenewfeaturescoming to the language, you'll also get some advice about what to consider before upgrading to thenewversion. Click the link below to download code examples demonstrating thenewcapabilities ofPython3.13:\n\n4. Python 3.13's best new features - Python Morsels\n   URL: https://www.pythonmorsels.com/python-313-whats-new/\n   Summary: Python3.13comes with a brandnewREPL and improvements to virtual environments and thePythondebugger.\n\n5. Python 3.13: A Beginner-Friendly Guide to All the Cool New Stuff\n   URL: https://dev.to/learncomputer/python-313-a-beginner-friendly-guide-to-all-the-cool-new-stuff-3nn1\n   Summary: Pythonjust got better! ThenewPython3.13(released in October 2024) is packed with upgrades that make coding faster, safer, and more fun. Whether you're a coding newbie or aPythonpro, this guide will break down every majorfeaturein simple terms, with examples you can try yourself.\n"},"isError":false}}
+
+STDERR:
+C:\Program Files\Python311\Lib\site-packages\pydantic\plugin\_schema_validator.py:39: UserWarning: ImportError while loading the `logfire-plugin` Pydantic plugin, this plugin will not be installed.
+
+ImportError("cannot import name 'LogData' from 'opentelemetry.sdk._logs' (C:\\Program Files\\Python311\\Lib\\site-packages\\opentelemetry\\sdk\\_logs\\__init__.py)")
+  plugins = get_plugins()
+[02/15/26 02:47:17] INFO     Processing request of type           server.py:720
+                             ListToolsRequest                                  
+                    INFO     Processing request of type           server.py:720
+                             CallToolRequest                                   
+[02/15/26 02:47:19] INFO     HTTP Request: POST                 _client.py:1740
+                             https://html.duckduckgo.com/html                  
+                             "HTTP/1.1 200 OK"                                 

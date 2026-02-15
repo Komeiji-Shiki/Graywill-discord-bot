@@ -1,0 +1,8 @@
+{
+    "name": "duckduckgo",
+    "description": "DuckDuckGo 搜索服务，提供网页搜索和网页内容抓取",
+    "type": "stdio",
+    "command": "python",
+    "args": [],
+    "env": {}
+}

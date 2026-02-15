@@ -1,0 +1,11 @@
+{
+  "name": "web_browser",
+  "description": "提供访问网页、提取内容功能的 MCP 服务器",
+  "type": "stdio",
+  "command": "python",
+  "args": ["-u", "mcp_servers/web_browser/server.py"],
+  "env": {
+    "ZHIHU_COOKIE": ""
+  },
+  "enabled": true
+}

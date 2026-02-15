@@ -6,6 +6,7 @@ import { useToast } from '../composables/useToast'
 interface ChannelOption {
   id: string
   name: string
+  timeZone: string
 }
 
 interface SessionOption {
@@ -62,6 +63,8 @@ const loadingChannels = ref(false)
 const loadingDetail = ref(false)
 const saving = ref(false)
 const triggering = ref(false)
+const exporting = ref(false)
+const importing = ref(false)
 const resummarizingIds = ref<number[]>([])
 
 const channels = ref<ChannelOption[]>([])
@@ -70,6 +73,9 @@ const sessions = ref<SessionOption[]>([])
 const activeChannelId = ref('')
 const activeSessionId = ref('')
 const summaries = ref<SummaryItem[]>([])
+const selectedSummaryIds = ref<number[]>([])
+const importSummaryText = ref('')
+const importFileInput = ref<HTMLInputElement | null>(null)
 
 // 总结配置
 const config = ref<SummaryConfig>({
@@ -93,19 +99,98 @@ const activeChannel = computed(
   () => channels.value.find((c) => c.id === activeChannelId.value) ?? null
 )
 
+const selectedCount = computed(() => selectedSummaryIds.value.length)
+const allSelected = computed(() =>
+  summaries.value.length > 0 &&
+  summaries.value.every((s) => selectedSummaryIds.value.includes(s.id))
+)
+
 function toChannelName(x: any): string {
   const name = String(x?.channelName ?? '').trim()
   return name || String(x?.channelId ?? '')
 }
 
-function formatRange(from?: string | null, to?: string | null): string {
-  const f = from ? String(from).slice(0, 16).replace('T', ' ') : '未知'
-  const t = to ? String(to).slice(0, 16).replace('T', ' ') : '未知'
+function formatIsoInTimeZone(iso?: string | null, timeZone = 'Asia/Shanghai'): string {
+  const raw = String(iso ?? '').trim()
+  if (!raw) return ''
+
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return raw
+
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+    .formatToParts(date)
+    .reduce<Record<string, string>>((acc, p) => {
+      if (p.type !== 'literal') acc[p.type] = p.value
+      return acc
+    }, {})
+
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`
+}
+
+function formatRange(from?: string | null, to?: string | null, timeZone = 'Asia/Shanghai'): string {
+  const f = formatIsoInTimeZone(from, timeZone) || '未知'
+  const t = formatIsoInTimeZone(to, timeZone) || '未知'
   return `${f} ~ ${t}`
 }
 
-function formatDate(iso: string): string {
-  return iso ? iso.slice(0, 16).replace('T', ' ') : ''
+function formatDate(iso: string, timeZone = 'Asia/Shanghai'): string {
+  return formatIsoInTimeZone(iso, timeZone)
+}
+
+function buildExportFileName(channelId: string, sessionId: string, count: number): string {
+  const safeChannel = String(channelId || 'channel').replace(/[^\w-]+/g, '_')
+  const safeSession = String(sessionId || 'all').replace(/[^\w-]+/g, '_')
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  return `summaries-${safeChannel}-${safeSession}-${count}-${stamp}.json`
+}
+
+function parseImportedSummaryText(raw: string): string {
+  const text = String(raw ?? '').trim()
+  if (!text) return ''
+
+  // 纯文本直接当作大总结
+  if (!(text.startsWith('{') || text.startsWith('['))) return text
+
+  try {
+    const parsed = JSON.parse(text) as any
+    if (typeof parsed?.summary === 'string' && parsed.summary.trim()) {
+      return parsed.summary.trim()
+    }
+    if (typeof parsed?.mergedSummary === 'string' && parsed.mergedSummary.trim()) {
+      return parsed.mergedSummary.trim()
+    }
+    if (typeof parsed?.content === 'string' && parsed.content.trim()) {
+      return parsed.content.trim()
+    }
+
+    if (Array.isArray(parsed?.summaries)) {
+      const merged = parsed.summaries
+        .map((x: any) => String(x?.summary ?? '').trim())
+        .filter(Boolean)
+        .join('\n\n')
+      return merged.trim()
+    }
+
+    if (Array.isArray(parsed)) {
+      const merged = parsed
+        .map((x: any) => String(x?.summary ?? x?.content ?? '').trim())
+        .filter(Boolean)
+        .join('\n\n')
+      return merged.trim()
+    }
+  } catch {
+    // 不是合法 JSON，回退为纯文本
+  }
+
+  return text
 }
 
 // 获取 system prompt 显示文本
@@ -128,6 +213,7 @@ async function loadChannels() {
     channels.value = channelRows.map((x) => ({
       id: String(x.channelId),
       name: toChannelName(x),
+      timeZone: String(x?.timeZone ?? 'Asia/Shanghai'),
     }))
     endpoints.value = endpointRows.map((x) => ({
       id: String(x.id),
@@ -213,6 +299,11 @@ watch(activeSessionId, (sid) => {
   }
 })
 
+watch(summaries, (rows) => {
+  const valid = new Set(rows.map((x) => x.id))
+  selectedSummaryIds.value = selectedSummaryIds.value.filter((id) => valid.has(id))
+})
+
 // ─── 总结操作 ───
 
 function startEdit(item: SummaryItem) {
@@ -294,6 +385,109 @@ async function resummarizeSummary(item: SummaryItem) {
     toast.error(err?.message || '重总结失败')
   } finally {
     resummarizingIds.value = resummarizingIds.value.filter((x) => x !== item.id)
+  }
+}
+
+function onToggleSelectAll(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  selectedSummaryIds.value = checked ? summaries.value.map((s) => s.id) : []
+}
+
+async function exportSelectedSummaries() {
+  if (!activeChannelId.value) return
+  if (selectedSummaryIds.value.length === 0) {
+    toast.info('请先勾选至少一条总结')
+    return
+  }
+
+  exporting.value = true
+  try {
+    const data = await api.post<any>(`/summaries/${activeChannelId.value}/export`, {
+      sessionId: activeSessionId.value || undefined,
+      ids: selectedSummaryIds.value,
+    })
+
+    const payloadText = JSON.stringify(data, null, 2)
+    const blob = new Blob([payloadText], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const filename = buildExportFileName(
+      activeChannelId.value,
+      activeSessionId.value || 'all',
+      Number(data?.count ?? selectedSummaryIds.value.length)
+    )
+
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+
+    toast.success(`已导出 ${Number(data?.count ?? selectedSummaryIds.value.length)} 条总结`)
+  } catch (err: any) {
+    toast.error(err?.message || '批量导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+
+function pickImportFile() {
+  importFileInput.value?.click()
+}
+
+async function onImportFileChanged(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+
+  try {
+    const raw = await file.text()
+    const parsed = parseImportedSummaryText(raw)
+    if (!parsed) {
+      toast.error('文件中未解析到可用总结内容')
+      return
+    }
+    importSummaryText.value = parsed
+    toast.success(`已载入文件：${file.name}`)
+  } catch (err: any) {
+    toast.error(err?.message || '读取导入文件失败')
+  } finally {
+    input.value = ''
+  }
+}
+
+async function importMergeSelectedSummaries() {
+  if (!activeChannelId.value) return
+  if (selectedSummaryIds.value.length === 0) {
+    toast.info('请先勾选要被覆盖的总结')
+    return
+  }
+
+  const summary = importSummaryText.value.trim()
+  if (!summary) {
+    toast.info('请先粘贴或导入“大总结”文本')
+    return
+  }
+
+  if (!confirm(`确认用当前大总结覆盖这 ${selectedSummaryIds.value.length} 条总结吗？`)) return
+
+  importing.value = true
+  try {
+    const data = await api.post<any>(`/summaries/${activeChannelId.value}/import-merge`, {
+      sessionId: activeSessionId.value || undefined,
+      replaceIds: selectedSummaryIds.value,
+      summary,
+    })
+
+    const replacedCount = Number(data?.replacedCount ?? selectedSummaryIds.value.length)
+    toast.success(`导入覆盖完成：已替换 ${replacedCount} 条总结`)
+    selectedSummaryIds.value = []
+    await loadDetail(activeChannelId.value, activeSessionId.value || undefined)
+  } catch (err: any) {
+    toast.error(err?.message || '导入覆盖失败')
+  } finally {
+    importing.value = false
   }
 }
 
@@ -417,14 +611,69 @@ onMounted(async () => {
       <div class="panel-header">
         <div>
           <div class="panel-title">总结压缩记录</div>
-          <div class="panel-subtitle">点击总结内容可编辑</div>
+          <div class="panel-subtitle">支持多选批量导出；可导入一个大总结覆盖选中总结</div>
         </div>
       </div>
       <div class="panel-body">
+        <div class="split batch-toolbar">
+          <label class="split" style="gap: 6px; align-items: center;">
+            <input
+              type="checkbox"
+              :checked="allSelected"
+              :disabled="summaries.length === 0"
+              @change="onToggleSelectAll"
+            />
+            <span class="muted">全选当前列表</span>
+          </label>
+          <span class="muted">已选择 {{ selectedCount }} 条</span>
+          <div style="flex: 1;"></div>
+          <input
+            ref="importFileInput"
+            type="file"
+            accept=".txt,.md,.json,.text"
+            style="display: none;"
+            @change="onImportFileChanged"
+          />
+          <button
+            class="stellar-button ghost"
+            :disabled="exporting || selectedCount === 0"
+            @click="exportSelectedSummaries"
+          >
+            {{ exporting ? '导出中...' : '导出选中' }}
+          </button>
+          <button class="stellar-button ghost" :disabled="importing" @click="pickImportFile">
+            读取文件
+          </button>
+        </div>
+
+        <label class="stack import-box">
+          <span class="muted">导入大总结文本（将覆盖当前勾选的总结）</span>
+          <textarea
+            class="stellar-textarea"
+            v-model="importSummaryText"
+            rows="4"
+            placeholder="可直接粘贴总结文本；或点上方“读取文件”加载 .txt/.md/.json"
+          />
+          <div class="split" style="gap: 8px; align-items: center;">
+            <span class="muted" style="font-size: 11px;">
+              JSON 支持字段：summary / mergedSummary / content（或 export 文件的 summaries）
+            </span>
+            <div style="flex: 1;"></div>
+            <button
+              class="stellar-button danger"
+              :disabled="importing || selectedCount === 0 || !importSummaryText.trim()"
+              @click="importMergeSelectedSummaries"
+            >
+              {{ importing ? '导入覆盖中...' : '导入覆盖选中' }}
+            </button>
+          </div>
+        </label>
+
         <div class="summary-table-wrap">
           <table class="stellar-table">
             <thead>
               <tr>
+                <th style="width: 42px;">选</th>
                 <th style="width: 50px;">#</th>
                 <th style="width: 200px;">覆盖区间</th>
                 <th>总结内容</th>
@@ -436,9 +685,12 @@ onMounted(async () => {
             </thead>
             <tbody>
               <tr v-for="item in summaries" :key="item.id">
+                <td>
+                  <input type="checkbox" :value="item.id" v-model="selectedSummaryIds" />
+                </td>
                 <td class="muted">{{ item.id }}</td>
                 <td class="muted" style="font-size: 11px;">
-                  {{ formatRange(item.coversFrom, item.coversTo) }}
+                  {{ formatRange(item.coversFrom, item.coversTo, activeChannel?.timeZone || 'Asia/Shanghai') }}
                 </td>
                 <td>
                   <!-- 编辑模式 -->
@@ -468,7 +720,7 @@ onMounted(async () => {
                 </td>
                 <td>{{ item.messageCount }}</td>
                 <td>{{ item.tokenCount }}</td>
-                <td class="muted" style="font-size: 11px;">{{ formatDate(item.createdAt) }}</td>
+                <td class="muted" style="font-size: 11px;">{{ formatDate(item.createdAt, activeChannel?.timeZone || 'Asia/Shanghai') }}</td>
                 <td>
                   <div class="split" style="gap: 4px; flex-wrap: wrap;">
                     <button
@@ -498,7 +750,7 @@ onMounted(async () => {
                 </td>
               </tr>
               <tr v-if="summaries.length === 0">
-                <td colspan="7" class="muted">当前频道暂无总结记录</td>
+                <td colspan="8" class="muted">当前频道暂无总结记录</td>
               </tr>
             </tbody>
           </table>
@@ -590,6 +842,16 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.batch-toolbar {
+  margin-bottom: 10px;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.import-box {
+  margin-bottom: 12px;
+}
+
 .summary-table-wrap {
   max-height: 600px;
   overflow: auto;

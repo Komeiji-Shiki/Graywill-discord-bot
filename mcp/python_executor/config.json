@@ -1,0 +1,11 @@
+{
+    "name": "python_executor",
+    "description": "本地Python代码执行器 - 支持执行Python代码、安装包、文件操作等",
+    "version": "1.0.0",
+    "type": "stdio",
+    "command": "python",
+    "args": [],
+    "env": {
+        "PYTHONIOENCODING": "utf-8"
+    }
+}

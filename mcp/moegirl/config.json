@@ -1,0 +1,8 @@
+{
+  "name": "moegirl",
+  "description": "萌娘百科 MCP 服务器 - 提供萌娘百科搜索、页面获取等功能",
+  "type": "stdio",
+  "command": "node",
+  "args": ["dist/mcp.js"],
+  "enabled": true
+}

@@ -1,0 +1,16 @@
+{
+    "name": "bing_browser_search",
+    "description": "Bing 浏览器搜索服务 (基于 Playwright，免费无需 API Key)",
+    "version": "1.0.0",
+    "type": "stdio",
+    "command": "python",
+    "args": [],
+    "env": {},
+    "tools": [
+        {
+            "name": "bing_browser_search",
+            "description": "使用浏览器模拟真实用户访问 Bing 搜索，无需 API Key，免费且稳定。返回详细的搜索结果，默认20条。"
+        }
+    ],
+    "enabled": false
+}

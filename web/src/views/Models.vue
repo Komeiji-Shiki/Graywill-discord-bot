@@ -56,8 +56,75 @@ const filteredModels = computed(() => {
   return remoteModels.value.filter((id: string) => id.toLowerCase().includes(kw))
 })
 
+type XmlToolsMode = 'auto' | 'xml' | 'native'
+
 const activeModel = computed(() => active.value?.model ?? '')
 const activeBaseUrl = computed(() => active.value?.baseUrl ?? '')
+
+function parseBooleanCompatFlag(v: unknown): boolean | null {
+  if (typeof v === 'boolean') return v
+  if (typeof v === 'number') return v !== 0
+  if (typeof v !== 'string') return null
+
+  const s = v.trim().toLowerCase()
+  if (!s) return null
+  if (['1', 'true', 'yes', 'on'].includes(s)) return true
+  if (['0', 'false', 'no', 'off'].includes(s)) return false
+  return null
+}
+
+function parseExtraParamsSafe(raw: string): Record<string, unknown> {
+  try {
+    return parseExtraParams(raw)
+  } catch {
+    return {}
+  }
+}
+
+function getXmlToolsMode(item: EndpointItem): XmlToolsMode {
+  const params = parseExtraParamsSafe(item.extraParams || '{}')
+  const forceNative =
+    parseBooleanCompatFlag((params as any).forceNativeTools) ??
+    parseBooleanCompatFlag((params as any).force_native_tools) ??
+    false
+  if (forceNative) return 'native'
+
+  const useXml =
+    parseBooleanCompatFlag((params as any).useXmlTools) ??
+    parseBooleanCompatFlag((params as any).use_xml_tools) ??
+    false
+  if (useXml) return 'xml'
+
+  return 'auto'
+}
+
+function setXmlToolsMode(item: EndpointItem, mode: XmlToolsMode) {
+  const params = parseExtraParamsSafe(item.extraParams || '{}')
+
+  delete (params as any).useXmlTools
+  delete (params as any).use_xml_tools
+  delete (params as any).forceNativeTools
+  delete (params as any).force_native_tools
+
+  if (mode === 'xml') {
+    ;(params as any).useXmlTools = true
+  } else if (mode === 'native') {
+    ;(params as any).forceNativeTools = true
+  }
+
+  item.extraParams = JSON.stringify(params, null, 2)
+}
+
+const activeXmlToolsMode = computed<XmlToolsMode>({
+  get() {
+    if (!active.value) return 'auto'
+    return getXmlToolsMode(active.value)
+  },
+  set(mode) {
+    if (!active.value) return
+    setXmlToolsMode(active.value, mode)
+  },
+})
 
 function resetModelPanel() {
   remoteModels.value = []
@@ -493,6 +560,14 @@ onMounted(loadEndpoints)
               <select class="stellar-select" v-model="active.showThinking">
                 <option :value="true">开启</option>
                 <option :value="false">关闭</option>
+              </select>
+            </label>
+            <label class="stack">
+              <span class="muted">工具调用兼容模式</span>
+              <select class="stellar-select" v-model="activeXmlToolsMode">
+                <option value="auto">自动（Claude 默认走 XML）</option>
+                <option value="xml">强制 XML 兼容</option>
+                <option value="native">强制原生 Tools</option>
               </select>
             </label>
           </div>
